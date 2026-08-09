@@ -2,23 +2,29 @@
 
 # InventarioPro
 
-**Inventory management REST API with full stock traceability, role-based access control and audit trail.**
+**Inventory management system with full stock traceability, role-based access control and audit trail.**
+
+.NET 9 REST API + Next.js dashboard.
 
 [![.NET](https://img.shields.io/badge/.NET-9.0-512BD4?style=flat-square&logo=dotnet&logoColor=white)](https://dotnet.microsoft.com/)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![EF Core](https://img.shields.io/badge/EF_Core-9.0-512BD4?style=flat-square)](https://learn.microsoft.com/ef/core/)
-[![Docker](https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white)](https://docs.docker.com/compose/)
+[![Next.js](https://img.shields.io/badge/Next.js-15-000000?style=flat-square&logo=nextdotjs&logoColor=white)](https://nextjs.org/)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat-square&logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)](LICENSE)
 
 </div>
 
 ---
 
+![Dashboard](dashboard/docs/screenshots/02-dashboard.png)
+
+---
+
 ## What this is
 
-A complete rewrite of a first-year university project — originally a WinForms desktop app on .NET Framework 4.8 backed by a Microsoft Access `.mdb` file, with no authentication, no tests and prices stored as integers.
+A complete rewrite of a first-year university project — originally a WinForms desktop app on .NET Framework 4.8, backed by a Microsoft Access `.mdb` file, with no authentication, no tests, and prices stored as integers.
 
-This version keeps the same domain (a small shop managing its stock) and rebuilds it as a production-shaped REST API. The point of the rewrite was to solve the problems the original ignored: **who changed the stock, when, and why** — and what happens when two people change it at the same time.
+The domain is the same (a small shop managing its stock). What changed is everything the original ignored: **who changed the stock, when, why — and what happens when two people change it at the same time.**
 
 ---
 
@@ -26,7 +32,7 @@ This version keeps the same domain (a small shop managing its stock) and rebuild
 
 In the original app, `Stock` was a column anyone could overwrite. Here it is a **derived value**.
 
-Every change goes through a `StockMovement` record — an immutable, append-only log of every entry, exit and adjustment. `Product.Stock` is a cached projection of that log, and the two are written inside a single database transaction. If the transaction fails, neither is written.
+Every change goes through a `StockMovement` — an immutable, append-only record of every entry, exit and adjustment. `Product.Stock` is a cached projection of that log, and both are written inside a single database transaction. If the transaction fails, neither is written.
 
 ```
 StockMovement (source of truth)          Product.Stock (projection)
@@ -35,20 +41,42 @@ StockMovement (source of truth)          Product.Stock (projection)
 └─ Adjustment  42  → StockAfter:  42   ────────►   42
 ```
 
-Consequences that fall out of this:
+What follows from this:
 
 - Stock can be **rebuilt from scratch** by replaying the movements
-- Every unit is traceable to a user, a timestamp and a reason
+- Every unit traces back to a user, a timestamp and a reason
 - A physical count that disagrees with the system is recorded as an `Adjustment`, not silently overwritten
-- Stock can never go negative — the domain method rejects it before the database is touched
+- Stock can never go negative — the domain rejects it before the database is touched
+
+The dashboard mirrors the same rule: **there is no "edit stock" field anywhere in the UI**, only a movement form.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────┐         ┌──────────────────────────┐
+│   dashboard/            │  HTTPS  │   api/                   │
+│   Next.js 15 · React 19 │ ──────► │   .NET 9 Web API         │
+│   TypeScript · Tailwind │  JWT    │   EF Core 9              │
+└─────────────────────────┘         └───────────┬──────────────┘
+                                                │
+                                    ┌───────────▼──────────────┐
+                                    │   PostgreSQL 16          │
+                                    │   Products · Movements   │
+                                    │   Users · Refresh tokens │
+                                    └──────────────────────────┘
+```
+
+The API works on its own — Swagger UI at `/swagger` exposes every endpoint. The dashboard is the human-facing layer on top of it, and can also run standalone in demo mode with in-memory data.
 
 ---
 
 ## Concurrency
 
-Two operators shipping from the same product at the same time is the classic way inventory systems corrupt themselves. Both read `Stock = 10`, both subtract 6, and the second write silently wins: the system says 4 when it should say -2.
+Two operators shipping the same product at the same time is the classic way inventory systems corrupt themselves. Both read `Stock = 10`, both subtract 6, and the second write silently wins: the system says 4 when it should say -2.
 
-This is handled with **optimistic concurrency** using PostgreSQL's `xmin` system column as a row version. If the row changed between read and write, EF Core raises `DbUpdateConcurrencyException` and the service retries up to three times with fresh data before giving up.
+Handled with **optimistic concurrency** using PostgreSQL's `xmin` system column as a row version. If the row changed between read and write, EF Core raises `DbUpdateConcurrencyException` and the service retries up to three times with fresh data.
 
 ```csharp
 e.Property(p => p.Version).IsRowVersion().HasColumnName("xmin");
@@ -63,52 +91,76 @@ e.Property(p => p.Version).IsRowVersion().HasColumnName("xmin");
 | SQL injection | EF Core parameterizes everything; sorting uses a whitelist, never string concatenation |
 | Password storage | ASP.NET Core Identity (PBKDF2), 10-char minimum with mixed character classes |
 | Brute force | Account lockout after 5 failed attempts + rate limiting of 8 req/min on auth endpoints |
-| User enumeration | Login returns an identical response whether the email exists or the password is wrong |
-| Token theft | Access tokens live 15 minutes; refresh tokens are rotated on every use |
+| User enumeration | Login responds identically whether the email exists or the password is wrong |
+| Token theft | Access tokens live 15 minutes; refresh tokens rotate on every use |
 | Refresh token reuse | Stored as SHA-256 hashes. A replayed token revokes the user's entire session family |
 | Mass assignment | Separate input DTOs — `Stock` and audit fields are not bindable from the request body |
 | Secret leakage | No secrets in `appsettings.json`; the app refuses to start if the JWT key is missing or under 32 chars |
-| Information disclosure | Unhandled exceptions return a generic `ProblemDetails`; stack traces are logged server-side only |
-| CORS | Explicit origin allowlist, never `AllowAnyOrigin` combined with credentials |
+| Information disclosure | Unhandled exceptions return a generic `ProblemDetails`; stack traces stay server-side |
 | Container | Runs as a non-root user (UID 10001) |
 
 ---
 
-## Stack
+## Screens
 
-- **.NET 9** — Web API with controllers
-- **PostgreSQL 16** via **EF Core 9** (Npgsql)
-- **ASP.NET Core Identity** + JWT bearer with refresh token rotation
-- **FluentValidation** for request validation
-- **Serilog** for structured logging
-- **xUnit** + **FluentAssertions** for tests
-- **Docker Compose** for local development
+### Products
+
+Search, category filter, sortable columns, pagination. Stock badges are colour-coded: red at zero, amber below the reorder threshold, green above it.
+
+![Products](dashboard/docs/screenshots/03-products.png)
+
+### Stock movement
+
+The form previews the resulting stock before saving and blocks an exit larger than what's available — the same rule the API enforces server-side, surfaced early so the operator doesn't hit an error after filling everything in.
+
+![Movement](dashboard/docs/screenshots/04-movement-modal.png)
+
+### Movement history
+
+Append-only log. Every record shows the delta, the resulting stock, the reason, the document reference and the user.
+
+![Movements](dashboard/docs/screenshots/05-movements.png)
 
 ---
 
 ## Running it
 
-The fastest path — API and database, one command:
+### Dashboard only (no backend needed)
 
 ```bash
-docker compose up --build
+cd dashboard
+npm install
+cp .env.example .env.local     # ships with NEXT_PUBLIC_DEMO_MODE=true
+npm run dev
 ```
 
-Then open **http://localhost:8080/swagger**. The database is migrated and seeded automatically in Development.
+Open **http://localhost:3000**. Runs on in-memory sample data, with a persistent banner making clear the data isn't real.
 
-### Running locally without Docker
+### Full stack
 
 ```bash
-# 1. Start PostgreSQL only
-docker compose up db -d
+# API + database
+cd api
+docker compose up --build      # Swagger at http://localhost:8080/swagger
 
-# 2. Configure secrets (never commit these)
-cd src/InventarioPro.Api
+# Dashboard pointing at it
+cd ../dashboard
+npm install
+cp .env.example .env.local
+# set NEXT_PUBLIC_DEMO_MODE=false and NEXT_PUBLIC_API_URL=http://localhost:8080
+npm run dev
+```
+
+### API without Docker
+
+```bash
+cd api/src/InventarioPro.Api
+
 dotnet user-secrets set "Jwt:Key" "$(openssl rand -base64 48)"
 dotnet user-secrets set "Seed:AdminEmail" "admin@inventariopro.local"
 dotnet user-secrets set "Seed:AdminPassword" "Admin#Local2026"
 
-# 3. Apply migrations and run
+dotnet ef migrations add InitialCreate
 dotnet ef database update
 dotnet run
 ```
@@ -116,51 +168,31 @@ dotnet run
 ### Tests
 
 ```bash
+cd api
 dotnet test
 ```
 
+Nine tests covering the stock invariants: no negative stock, insufficient-stock rejection, adjustment arithmetic, inactive products, and history-to-stock consistency. They run on an in-memory provider — no database required.
+
 ---
 
-## API
+## API reference
 
 All endpoints require a bearer token except `/api/auth/*` and `/health`.
 
-### Auth
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/api/auth/register` | Create an account (assigned `Viewer`) |
-| `POST` | `/api/auth/login` | Returns access + refresh token |
-| `POST` | `/api/auth/refresh` | Rotate tokens |
-| `POST` | `/api/auth/logout` | Revoke all sessions |
-| `GET` | `/api/auth/me` | Current user profile |
-
-### Products
-
 | Method | Endpoint | Role |
 |---|---|---|
+| `POST` | `/api/auth/register` · `login` · `refresh` · `logout` | — |
 | `GET` | `/api/products` | any |
-| `GET` | `/api/products/{id}` | any |
-| `POST` | `/api/products` | Admin, Manager |
-| `PUT` | `/api/products/{id}` | Admin, Manager |
+| `POST` `PUT` | `/api/products` | Admin, Manager |
 | `DELETE` | `/api/products/{id}` | Admin |
-
-Supports `?search=`, `?categoryId=`, `?lowStockOnly=true`, `?minPrice=`, `?sortBy=price&desc=true`, `?page=1&pageSize=20`.
-
-### Stock
-
-| Method | Endpoint | Role |
-|---|---|---|
 | `GET` | `/api/stock/movements` | any |
 | `POST` | `/api/stock/movements` | Admin, Manager |
+| `GET` | `/api/reports/valuation` | any |
+| `GET` | `/api/reports/valuation/by-category` | any |
+| `GET` | `/api/reports/low-stock` | any |
 
-### Reports
-
-| Method | Endpoint | Description |
-|---|---|---|
-| `GET` | `/api/reports/valuation` | Units, cost value, sale value, potential margin |
-| `GET` | `/api/reports/valuation/by-category` | Same, broken down by category |
-| `GET` | `/api/reports/low-stock` | Products at or below their reorder threshold |
+Products support `?search=`, `?categoryId=`, `?lowStockOnly=true`, `?minPrice=`, `?sortBy=price&desc=true`, `?page=1&pageSize=20`.
 
 ### Example — register a stock exit
 
@@ -180,13 +212,11 @@ curl -X POST http://localhost:8080/api/stock/movements \
 ```json
 {
   "id": 12,
-  "productId": 1,
   "productSku": "BEB-001",
   "productName": "Agua mineral 500ml",
   "type": "Out",
   "quantity": 5,
   "stockAfter": 115,
-  "reason": "Counter sale",
   "reference": "TICKET-4471",
   "createdAt": "2026-08-09T14:22:10.441Z"
 }
@@ -199,32 +229,30 @@ curl -X POST http://localhost:8080/api/stock/movements \
 | Role | Permissions |
 |---|---|
 | `Viewer` | Read products, movements and reports |
-| `Manager` | Everything above + create/edit products, register stock movements |
-| `Admin` | Everything above + delete products and categories |
+| `Manager` | + create/edit products, register stock movements |
+| `Admin` | + delete products and categories |
 
 ---
 
-## Project structure
+## Structure
 
 ```
-src/InventarioPro.Api/
-├── Domain/
-│   ├── Entities/       Product, Category, Supplier, StockMovement, RefreshToken
-│   └── Enums/          MovementType
-├── Data/
-│   ├── AppDbContext    EF configuration, soft delete filters, audit interceptor
-│   └── DbInitializer   Migrations, roles, seed data
-├── Services/
-│   ├── TokenService    JWT issuing, refresh rotation, reuse detection
-│   ├── ProductService  Search, filtering, pagination
-│   └── StockService    The only component allowed to mutate stock
-├── Controllers/        Auth, Products, Categories, Suppliers, Stock, Reports
-├── Dtos/               Input/output contracts
-├── Validation/         FluentValidation rules
-└── Common/             Paging, domain exceptions, global exception handler
-
-tests/InventarioPro.Tests/
-└── StockServiceTests   Stock invariants, adjustments, insufficient stock, history integrity
+inventario-pro/
+├── api/                                    .NET 9 REST API
+│   ├── src/InventarioPro.Api/
+│   │   ├── Domain/         Entities and enums
+│   │   ├── Data/           DbContext, soft delete, audit, seeding
+│   │   ├── Services/       Token, Product, Stock
+│   │   ├── Controllers/    Auth, Products, Categories, Suppliers, Stock, Reports
+│   │   ├── Dtos/           Input/output contracts
+│   │   ├── Validation/     FluentValidation rules
+│   │   └── Common/         Paging, exceptions, global handler
+│   └── tests/              xUnit suite over stock invariants
+│
+└── dashboard/                              Next.js 15 front-end
+    ├── src/app/            login · dashboard · products · movements
+    ├── src/components/     AppShell, MovementModal, DemoBanner
+    └── src/lib/            API client with JWT refresh, demo fixtures, types
 ```
 
 ---
@@ -233,7 +261,7 @@ tests/InventarioPro.Tests/
 
 | | Before | Now |
 |---|---|---|
-| Platform | WinForms, .NET Framework 4.8 | REST API, .NET 9 |
+| Platform | WinForms, .NET Framework 4.8 | REST API + web dashboard |
 | Database | Access `.mdb` via OleDb | PostgreSQL via EF Core |
 | Data access | `DataSet` + `CommandBuilder` | Typed entities, LINQ, migrations |
 | Money | `int` | `decimal(18,2)` |
@@ -242,7 +270,7 @@ tests/InventarioPro.Tests/
 | Auth | None | Identity + JWT + roles |
 | Deletion | Physical `DELETE` | Soft delete, history preserved |
 | Audit | None | Who/when on every entity |
-| Tests | None | xUnit suite over stock invariants |
+| Tests | None | 9 xUnit tests |
 | Deployment | Manual `.exe` | Docker Compose |
 
 ---
