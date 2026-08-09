@@ -1,0 +1,29 @@
+# Build
+bin/
+obj/
+out/
+[Dd]ebug/
+[Rr]elease/
+*.user
+*.suo
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Secretos: nunca versionar
+appsettings.Production.json
+appsettings.Local.json
+*.pfx
+*.key
+.env
+.env.*
+!.env.example
+
+# Tests
+[Tt]est[Rr]esult*/
+coverage/
+*.coverage

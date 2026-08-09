@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: inventariopro-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: inventariopro
+      POSTGRES_USER: postgres
+      # Solo para desarrollo local. En producción va por secreto del orquestador.
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d inventariopro"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: inventariopro-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ASPNETCORE_ENVIRONMENT: Development
+      ASPNETCORE_URLS: http://+:8080
+      ConnectionStrings__Default: "Host=db;Port=5432;Database=inventariopro;Username=postgres;Password=postgres"
+      # Generá la tuya con: openssl rand -base64 48
+      Jwt__Key: "CAMBIAME_clave_de_desarrollo_de_al_menos_32_caracteres"
+      Jwt__Issuer: "InventarioPro"
+      Jwt__Audience: "InventarioProClient"
+      Seed__AdminEmail: "admin@inventariopro.local"
+      Seed__AdminPassword: "Admin#Local2026"
+      Cors__AllowedOrigins__0: "http://localhost:3000"
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:
